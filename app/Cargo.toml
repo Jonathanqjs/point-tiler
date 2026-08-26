@@ -4,6 +4,10 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 
+[lib]
+name = "point_tiler"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ptiler"
 path = "src/main.rs"
