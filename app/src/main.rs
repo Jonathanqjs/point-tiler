@@ -26,6 +26,7 @@ use pcd_exporter::gltf::GlbOptions;
 use pcd_parser::reader::PointReader;
 use pcd_parser::reader::csv::CsvPointReader;
 use pcd_parser::reader::las::LasPointReader;
+use pcd_parser::reader::ply::PlyPointReader;
 use rayon::iter::{IntoParallelIterator as _, IntoParallelRefIterator as _, ParallelIterator as _};
 use tempfile::tempdir;
 use tinymvt::tileid::hilbert;
@@ -709,6 +710,10 @@ fn estimate_processing_size(paths: &[PathBuf], extension: Extension) -> u64 {
             .map(LasPointReader::estimate_processing_size)
             .sum(),
         Extension::Csv | Extension::Txt => estimate_total_size(paths),
+        Extension::Ply => paths
+            .iter()
+            .map(PlyPointReader::estimate_processing_size)
+            .sum(),
     }
 }
 
@@ -797,6 +802,9 @@ fn in_memory_workflow(
                 }
                 Extension::Csv | Extension::Txt => {
                     Box::new(CsvPointReader::new(vec![file.clone()]).unwrap())
+                }
+                Extension::Ply => {
+                    Box::new(PlyPointReader::new(vec![file.clone()]).unwrap())
                 }
             };
 
@@ -992,6 +1000,9 @@ fn external_sort_workflow(
                     }
                     Extension::Csv | Extension::Txt => {
                         Box::new(CsvPointReader::new(chunk).unwrap())
+                    }
+                    Extension::Ply => {
+                        Box::new(PlyPointReader::new(chunk).unwrap())
                     }
                 };
 

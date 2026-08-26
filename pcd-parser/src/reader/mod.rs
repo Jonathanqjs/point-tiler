@@ -1,5 +1,6 @@
 pub mod csv;
 pub mod las;
+pub mod ply;
 
 use pcd_core::pointcloud::point::Point;
 use std::io;

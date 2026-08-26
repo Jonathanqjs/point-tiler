@@ -1,0 +1,16 @@
+ply
+format ascii 1.0
+comment sample point cloud in EPSG:6677
+element vertex 5
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+end_header
+-5599.971 -35106.097 3.602 76 78 80
+-5599.976 -35111.458 3.440 80 82 84
+-5599.978 -35115.695 3.543 74 75 79
+-5599.992 -35119.757 3.603 72 78 81
+-5599.992 -35129.327 3.431 72 77 82

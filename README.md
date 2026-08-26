@@ -1,6 +1,6 @@
 # Point Tiler
 
-A tool for converting point cloud data (LAS/LAZ/CSV) into 3D Tiles v1.1.
+A tool for converting point cloud data (LAS/LAZ/CSV/PLY) into 3D Tiles v1.1.
 
 **English**|[日本語](./README.ja.md)
 
@@ -12,13 +12,13 @@ Point Tiler stands out from existing open-source point cloud tilers in the follo
 
 - **Native 3D Tiles 1.1 output** — Directly outputs GLB (glTF Binary) files as specified in 3D Tiles 1.1. Most alternatives still rely on the legacy `.pnts` format (3D Tiles 1.0) or offer only experimental 1.1 support.
 - **Versatile compression** — Supports quantization (`KHR_mesh_quantization`), meshopt compression (`EXT_meshopt_compression`), and GZIP to significantly reduce output file sizes.
-- **LAZ support** — Reads compressed LAZ files with parallel decoding, which is essential for real-world workflows where LAZ is the dominant format.
+- **LAZ & PLY support** — Reads compressed LAZ files with parallel decoding as well as ASCII and binary PLY point clouds.
 - **Large-scale data handling via external sort** — Automatically switches between in-memory and external sort workflows based on a conservative in-memory estimate, so you don't need to manually split files to fit in RAM.
 - **Fast conversion** — Built in Rust with Rayon-based parallelism, delivering high throughput for large datasets.
 
 ## Features
 
-- Converts LAS/LAZ/CSV point cloud data to 3D Tiles v1.1 format
+- Converts LAS/LAZ/CSV/PLY point cloud data to 3D Tiles v1.1 format
 - Built-in PROJ library supporting a wide range of coordinate systems
 - High-performance parallel processing with Rayon
 - Streaming processing for large-scale data
@@ -33,7 +33,7 @@ Point Tiler stands out from existing open-source point cloud tilers in the follo
 point-tiler/
 ├── app/                       # Main CLI application
 ├── pcd-core/                  # Core point cloud data structures
-├── pcd-parser/                # LAS/LAZ/CSV file parsers
+├── pcd-parser/                # LAS/LAZ/CSV/PLY file parsers
 ├── pcd-exporter/              # Tiling and 3D Tiles export
 ├── coordinate-transformer/    # Coordinate transformation (PROJ-based)
 └── cesiumtiles-gltf/          # glTF/GLB I/O for 3D Tiles output
@@ -64,7 +64,7 @@ After installing Rust, download this repository.
 
 | Option                 | Description                                                                                                                                                |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--input`, `-i`        | Input file path(s). Supports `.las`, `.laz`, `.csv`, `.txt`. Multiple files can be specified.                                                              |
+| `--input`, `-i`        | Input file path(s). Supports `.las`, `.laz`, `.csv`, `.txt`, `.ply`. Multiple files can be specified.                                                      |
 | `--output`, `-o`       | Output folder path. Outputs `tileset.json` and GLB files.                                                                                                  |
 | `--input-epsg`         | EPSG code of the input coordinate system. Supports any EPSG code via PROJ.                                                                                 |
 | `--output-epsg`        | EPSG code of the output coordinate system. Typically EPSG:4979 (WGS84 Geographic 3D) for Cesium.                                                           |
