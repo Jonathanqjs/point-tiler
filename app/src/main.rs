@@ -64,6 +64,7 @@ impl From<Cli> for ConvertOptions {
             gzip_compress: cli.gzip_compress,
             meshopt: cli.meshopt,
             disable_decimation: cli.disable_decimation,
+            on_progress: None,
         }
     }
 }

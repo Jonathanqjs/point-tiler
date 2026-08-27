@@ -257,6 +257,8 @@ fn write_leaf_runs(
     leaves: &HashSet<TileCoord>,
     run_root: &Path,
     max_memory_mb: usize,
+    point_count: u64,
+    args: &ConvertOptions,
 ) -> std::io::Result<()> {
     let max_points = ((max_memory_mb.max(1) * 1024 * 1024) / std::mem::size_of::<Point>())
         .clamp(10_000, 1_000_000);
@@ -264,6 +266,7 @@ fn write_leaf_runs(
     let mut buckets = HashMap::<TileCoord, Vec<Point>>::new();
     let mut buffered = 0;
     let mut run_index = 0;
+    let mut processed: u64 = 0;
     let flush = |buckets: &mut HashMap<TileCoord, Vec<Point>>, run_index: usize| {
         for (tile, points) in buckets.drain() {
             let (z, x, y) = tile;
@@ -280,6 +283,17 @@ fn write_leaf_runs(
             .or_default()
             .push(point);
         buffered += 1;
+        processed += 1;
+        if processed % 100_000 == 0 || processed == point_count {
+            let ratio = (processed as f32 / point_count.max(1) as f32).min(1.0);
+            let p = 0.20 + ratio * 0.35;
+            crate::report_progress(
+                args,
+                p,
+                "Partitioning points",
+                Some(&format!("{}/{} points ({:.0}%)", processed, point_count, ratio * 100.0)),
+            );
+        }
         if buffered >= max_points {
             flush(&mut buckets, run_index)?;
             run_index += 1;
@@ -293,7 +307,10 @@ fn materialize_leaves(
     run_root: &Path,
     tile_root: &Path,
     leaves: &HashSet<TileCoord>,
+    args: &ConvertOptions,
 ) -> std::io::Result<()> {
+    let total = leaves.len();
+    let mut done = 0;
     for &(z, x, y) in leaves {
         let pattern = run_root.join(format!("{z}/{x}/{y}/*.bin"));
         let mut points = Vec::new();
@@ -304,6 +321,17 @@ fn materialize_leaves(
             points.extend(read_points(&path)?);
         }
         write_points(&tile_path(tile_root, (z, x, y)), &points)?;
+        done += 1;
+        if done % 10 == 0 || done == total {
+            let ratio = done as f32 / total.max(1) as f32;
+            let p = 0.55 + ratio * 0.10;
+            crate::report_progress(
+                args,
+                p,
+                "Writing leaf tiles",
+                Some(&format!("{done}/{total} tiles ({:.0}%)", ratio * 100.0)),
+            );
+        }
     }
     Ok(())
 }
@@ -354,7 +382,9 @@ fn aggregate_parents(
     grid: CartesianGrid,
     maximum_depth: u8,
     disabled: bool,
+    args: &ConvertOptions,
 ) -> std::io::Result<()> {
+    crate::report_progress(args, 0.66, "Building LOD pyramid", Some("Aggregating parent tiles"));
     for child_z in (1..=maximum_depth).rev() {
         let pattern = tile_root.join(format!("{child_z}/**/*.bin"));
         let mut parents = HashMap::<TileCoord, Vec<PathBuf>>::new();
@@ -362,21 +392,17 @@ fn aggregate_parents(
             .map_err(|error| std::io::Error::other(error.to_string()))?
             .filter_map(Result::ok)
         {
-            parents
-                .entry(parent(parse_tile_path(&path)))
-                .or_default()
-                .push(path);
+            let coord = parse_tile_path(&path);
+            parents.entry(parent(coord)).or_default().push(path);
         }
-        for (tile, children) in parents {
+        let voxel_size = (grid.span / (1u64 << (child_z - 1)) as f64) * 0.005;
+        for (parent_coord, child_paths) in parents {
             let mut points = Vec::new();
-            for child in children {
-                points.extend(read_points(&child)?);
+            for child_path in child_paths {
+                points.extend(read_points(&child_path)?);
             }
-            let cell_span = grid.span / (1u64 << tile.0) as f64;
-            write_points(
-                &tile_path(tile_root, tile),
-                &decimate(points, cell_span / 64.0, disabled),
-            )?;
+            let decimated = decimate(points, voxel_size, disabled);
+            write_points(&tile_path(tile_root, parent_coord), &decimated)?;
         }
     }
     Ok(())
@@ -447,31 +473,47 @@ fn export_tiles(
     output: &Path,
     maximum_depth: u8,
     options: &GlbOptions,
+    args: &ConvertOptions,
 ) -> std::io::Result<Vec<TileInfo>> {
-    let mut infos = Vec::new();
+    let mut all_paths = Vec::new();
     for z in 0..=maximum_depth {
         let pattern = tile_root.join(format!("{z}/**/*.bin"));
         for path in glob::glob(pattern.to_str().unwrap())
             .map_err(|error| std::io::Error::other(error.to_string()))?
             .filter_map(Result::ok)
         {
-            let (_, x, y) = parse_tile_path(&path);
-            let cloud = PointCloud::new(read_points(&path)?, 0);
-            let bounds = Bounds {
-                min: cloud.metadata.bounding_volume.min,
-                max: cloud.metadata.bounding_volume.max,
-            };
-            let uri = format!("{z}/{x}/{y}.glb");
-            let destination = output.join(&uri);
-            fs::create_dir_all(destination.parent().unwrap())?;
-            let glb = pcd_exporter::gltf::generate_glb_with_options(cloud, options)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            glb.to_writer_with_alignment(BufWriter::new(File::create(destination)?), 8)?;
-            infos.push(TileInfo {
-                coord: (z, x, y),
-                uri,
-                bounds,
-            });
+            all_paths.push(path);
+        }
+    }
+    let total = all_paths.len();
+    let mut infos = Vec::new();
+    for (index, path) in all_paths.iter().enumerate() {
+        let (z, x, y) = parse_tile_path(path);
+        let cloud = PointCloud::new(read_points(path)?, 0);
+        let bounds = Bounds {
+            min: cloud.metadata.bounding_volume.min,
+            max: cloud.metadata.bounding_volume.max,
+        };
+        let uri = format!("{z}/{x}/{y}.glb");
+        let destination = output.join(&uri);
+        fs::create_dir_all(destination.parent().unwrap())?;
+        let glb = pcd_exporter::gltf::generate_glb_with_options(cloud, options)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        glb.to_writer_with_alignment(BufWriter::new(File::create(destination)?), 8)?;
+        infos.push(TileInfo {
+            coord: (z, x, y),
+            uri,
+            bounds,
+        });
+        if (index + 1) % 5 == 0 || index + 1 == total {
+            let ratio = (index + 1) as f32 / total.max(1) as f32;
+            let p = 0.70 + ratio * 0.25;
+            crate::report_progress(
+                args,
+                p,
+                "Exporting 3D Tiles (GLB)",
+                Some(&format!("{}/{} tiles ({:.0}%)", index + 1, total, ratio * 100.0)),
+            );
         }
     }
     Ok(infos)
@@ -483,8 +525,15 @@ pub(crate) fn convert(
     args: &ConvertOptions,
     output: &Path,
 ) -> std::io::Result<()> {
+    crate::report_progress(args, 0.05, "Scanning bounds", Some("Analyzing point cloud bounds"));
     let (bounds, point_count) = scan_bounds(&input_files, extension)?;
     let grid = CartesianGrid::from_bounds(bounds);
+    crate::report_progress(
+        args,
+        0.12,
+        "Calculating spatial index",
+        Some(&format!("Scanned {point_count} points")),
+    );
     let mut depth = estimated_depth(bounds, point_count, args.max);
     let counts = loop {
         let counts = histogram(&input_files, extension, grid, depth)?;
@@ -502,6 +551,12 @@ pub(crate) fn convert(
         depth,
         leaves.len()
     );
+    crate::report_progress(
+        args,
+        0.20,
+        "Partitioning point cloud",
+        Some(&format!("{point_count} points, {} leaf tiles", leaves.len())),
+    );
 
     let temporary = tempdir()?;
     let run_root = temporary.path().join("runs");
@@ -514,16 +569,19 @@ pub(crate) fn convert(
         &leaves,
         &run_root,
         args.max_memory_mb,
+        point_count,
+        args,
     )?;
-    materialize_leaves(&run_root, &tile_root, &leaves)?;
-    aggregate_parents(&tile_root, grid, depth, args.disable_decimation)?;
+    materialize_leaves(&run_root, &tile_root, &leaves, args)?;
+    aggregate_parents(&tile_root, grid, depth, args.disable_decimation, args)?;
 
     let options = GlbOptions {
         quantize: args.quantize,
         meshopt: args.meshopt,
         gzip_compress: false,
     };
-    let infos = export_tiles(&tile_root, output, depth, &options)?;
+    let infos = export_tiles(&tile_root, output, depth, &options, args)?;
+    crate::report_progress(args, 0.96, "Generating tileset metadata", Some("Linking hierarchy"));
     let mut tree = TreeNode::default();
     for info in infos {
         tree.insert(info);
@@ -550,6 +608,7 @@ pub(crate) fn convert(
         output.join("tileset.json"),
         serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?,
     )?;
+    crate::report_progress(args, 1.0, "3D Tiles ready", Some("Conversion complete"));
     Ok(())
 }
 
