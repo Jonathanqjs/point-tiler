@@ -1,23 +1,30 @@
 use chrono::Local;
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use env_logger::Builder;
 use log::LevelFilter;
-use point_tiler::{ConvertOptions, convert};
+use point_tiler::{ConvertOptions, InputReference, convert};
 use std::io::Write;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "Point Tiler",
-    about = "A tool for converting point cloud data into 3D Tiles"
+    about = "A tool for converting point cloud data into 3D Tiles",
+    group(
+        ArgGroup::new("input_reference")
+            .required(true)
+            .args(["input_epsg", "cartesian_meters"])
+    )
 )]
 struct Cli {
     #[arg(short, long, required = true, num_args = 1.., value_name = "FILE")]
     input: Vec<String>,
     #[arg(short, long, required = true, value_name = "DIR")]
     output: String,
-    #[arg(long, required = true)]
-    input_epsg: u16,
-    #[arg(long, required = true)]
+    #[arg(long, conflicts_with = "cartesian_meters")]
+    input_epsg: Option<u16>,
+    #[arg(long, conflicts_with = "input_epsg")]
+    cartesian_meters: bool,
+    #[arg(long, default_value_t = 4979)]
     output_epsg: u16,
     #[arg(long, default_value_t = 15)]
     min: u8,
@@ -39,10 +46,15 @@ struct Cli {
 
 impl From<Cli> for ConvertOptions {
     fn from(cli: Cli) -> Self {
+        let input_reference = if let Some(code) = cli.input_epsg {
+            InputReference::Epsg { code }
+        } else {
+            InputReference::CartesianMeters
+        };
         Self {
             input: cli.input,
             output: cli.output,
-            input_epsg: cli.input_epsg,
+            input_reference,
             output_epsg: cli.output_epsg,
             min: cli.min,
             max: cli.max,

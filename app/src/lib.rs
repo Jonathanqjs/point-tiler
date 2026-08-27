@@ -35,12 +35,52 @@ use pcd_exporter::{
 };
 use pcd_parser::parser::{Extension, get_extension};
 
+mod cartesian;
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum InputReference {
+    Epsg { code: u16 },
+    CartesianMeters,
+}
+
+impl Default for InputReference {
+    fn default() -> Self {
+        Self::Epsg { code: 0 }
+    }
+}
+
+enum CoordinateTransformer {
+    Epsg(PointTransformer),
+}
+
+impl CoordinateTransformer {
+    fn new(input: InputReference, output_epsg: u16) -> std::io::Result<Self> {
+        match input {
+            InputReference::Epsg { code } => PointTransformer::new(code, output_epsg, None)
+                .map(Self::Epsg)
+                .map_err(|e| std::io::Error::other(format!("Failed to create transformer: {e}"))),
+            InputReference::CartesianMeters => Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "Cartesian input must use the Cartesian tiling workflow",
+            )),
+        }
+    }
+
+    fn transform_points_in_place(&mut self, points: &mut [Point]) -> std::io::Result<()> {
+        let result = match self {
+            Self::Epsg(transformer) => transformer.transform_points_in_place(points),
+        };
+        result.map_err(|e| std::io::Error::other(format!("Failed to transform points: {e}")))
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct ConvertOptions {
     pub input: Vec<String>,
     pub output: String,
-    pub input_epsg: u16,
+    pub input_reference: InputReference,
     pub output_epsg: u16,
     pub min: u8,
     pub max: u8,
@@ -57,7 +97,7 @@ impl Default for ConvertOptions {
         Self {
             input: Vec::new(),
             output: String::new(),
-            input_epsg: 0,
+            input_reference: InputReference::default(),
             output_epsg: 4979,
             min: 15,
             max: 18,
@@ -543,16 +583,14 @@ fn export_tiles_to_glb(
                 acc
             });
 
-            // Subtract ECEF offset and swap axes for Cesium
-            // Local ECEF (X, Y, Z) → Cesium (X, Z, -Y)
+            // Subtract ECEF offset
             for p in &mut points {
-                let (x, y, z) = (p.x - ecef_min[0], p.y - ecef_min[1], p.z - ecef_min[2]);
-                p.x = x;
-                p.y = z;
-                p.z = -y;
+                p.x -= ecef_min[0];
+                p.y -= ecef_min[1];
+                p.z -= ecef_min[2];
             }
 
-            // Store ECEF offset in TileContent (before axis swap)
+            // Store ECEF offset in TileContent
             tile_content.translation = ecef_min;
 
             let glb_path = output_path.join(&tile_content.content_path);
@@ -779,6 +817,12 @@ fn log_directory_summary(label: &str, base_path: &Path) {
     }
 }
 
+fn serialize_tileset_with_z_up(tileset: cesiumtiles::tileset::Tileset) -> std::io::Result<String> {
+    let mut value = serde_json::to_value(tileset).map_err(std::io::Error::other)?;
+    value["asset"]["gltfUpAxis"] = serde_json::json!("Z");
+    serde_json::to_string_pretty(&value).map_err(std::io::Error::other)
+}
+
 fn in_memory_workflow(
     input_files: Vec<PathBuf>,
     args: &ConvertOptions,
@@ -789,37 +833,32 @@ fn in_memory_workflow(
     log::info!("start parse and transform and tiling...");
     let start_local = std::time::Instant::now();
 
-    let epsg_in = args.input_epsg;
-    let epsg_out = args.output_epsg;
-
     // Read multiple files in parallel
-    let mut all_points: Vec<Point> = input_files
+    let point_batches: std::io::Result<Vec<Vec<Point>>> = input_files
         .par_iter()
-        .flat_map(|file| {
+        .map(|file| -> std::io::Result<Vec<Point>> {
             let mut reader: Box<dyn PointReader> = match extension {
                 Extension::Las | Extension::Laz => {
-                    Box::new(LasPointReader::new(vec![file.clone()]).unwrap())
+                    Box::new(LasPointReader::new(vec![file.clone()])?)
                 }
                 Extension::Csv | Extension::Txt => {
-                    Box::new(CsvPointReader::new(vec![file.clone()]).unwrap())
+                    Box::new(CsvPointReader::new(vec![file.clone()])?)
                 }
-                Extension::Ply => Box::new(PlyPointReader::new(vec![file.clone()]).unwrap()),
+                Extension::Ply => Box::new(PlyPointReader::new(vec![file.clone()])?),
             };
 
             let mut points = Vec::new();
-            while let Ok(Some(p)) = reader.next_point() {
+            while let Some(p) = reader.next_point()? {
                 points.push(p);
             }
-            points
+            Ok(points)
         })
         .collect();
+    let mut all_points = point_batches?.into_iter().flatten().collect::<Vec<_>>();
 
     // Coordinate transformation
-    let mut transformer = PointTransformer::new(epsg_in, epsg_out, None)
-        .map_err(|e| std::io::Error::other(format!("Failed to create transformer: {e}")))?;
-    transformer
-        .transform_points_in_place(&mut all_points)
-        .map_err(|e| std::io::Error::other(format!("Failed to transform points: {e}")))?;
+    let mut transformer = CoordinateTransformer::new(args.input_reference, args.output_epsg)?;
+    transformer.transform_points_in_place(&mut all_points)?;
 
     log::info!(
         "Finish transforming and tiling in {:?}",
@@ -933,10 +972,7 @@ fn in_memory_workflow(
     };
     let root_tileset_path = output_path.join("tileset.json");
     fs::create_dir_all(root_tileset_path.parent().unwrap())?;
-    fs::write(
-        root_tileset_path,
-        serde_json::to_string_pretty(&tileset).unwrap(),
-    )?;
+    fs::write(root_tileset_path, serialize_tileset_with_z_up(tileset)?)?;
 
     Ok(())
 }
@@ -967,7 +1003,7 @@ fn external_sort_workflow(
         let num_cores = args.threads.filter(|&n| n > 0).unwrap_or(num_cpus::get());
 
         let extension = check_and_get_extension(&input_files).unwrap();
-        let epsg_in = args.input_epsg;
+        let input_reference = args.input_reference;
         let epsg_out = args.output_epsg;
 
         log::info!("memory budget: {}", format_size(max_memory_mb_bytes as u64));
@@ -975,7 +1011,7 @@ fn external_sort_workflow(
         log::info!("channel_capacity: {}", channel_capacity);
         log::info!("num_cores: {}", num_cores);
 
-        let (tx, rx) = mpsc::sync_channel::<Vec<Point>>(channel_capacity);
+        let (tx, rx) = mpsc::sync_channel::<std::io::Result<Vec<Point>>>(channel_capacity);
 
         // Spawn multiple reader threads
         let chunk_size = input_files.len().div_ceil(num_cores);
@@ -986,45 +1022,37 @@ fn external_sort_workflow(
             let tx = tx.clone();
             let extension_copy = extension;
 
-            let handle = thread::spawn(move || {
+            let handle = thread::spawn(move || -> std::io::Result<()> {
                 // Create a transformer per thread
-                let mut transformer = PointTransformer::new(epsg_in, epsg_out, None)
-                    .expect("Failed to create transformer");
+                let mut transformer = CoordinateTransformer::new(input_reference, epsg_out)?;
 
                 let mut buffer = Vec::with_capacity(default_chunk_points_len);
                 let mut reader: Box<dyn PointReader> = match extension_copy {
-                    Extension::Las | Extension::Laz => {
-                        Box::new(LasPointReader::new(chunk).unwrap())
-                    }
-                    Extension::Csv | Extension::Txt => {
-                        Box::new(CsvPointReader::new(chunk).unwrap())
-                    }
-                    Extension::Ply => Box::new(PlyPointReader::new(chunk).unwrap()),
+                    Extension::Las | Extension::Laz => Box::new(LasPointReader::new(chunk)?),
+                    Extension::Csv | Extension::Txt => Box::new(CsvPointReader::new(chunk)?),
+                    Extension::Ply => Box::new(PlyPointReader::new(chunk)?),
                 };
 
-                while let Ok(Some(p)) = reader.next_point() {
+                while let Some(p) = reader.next_point()? {
                     buffer.push(p);
                     if buffer.len() >= default_chunk_points_len {
                         // Transform coordinates in batch
-                        transformer
-                            .transform_points_in_place(&mut buffer)
-                            .expect("Failed to transform points");
+                        transformer.transform_points_in_place(&mut buffer)?;
                         let to_send = std::mem::replace(
                             &mut buffer,
                             Vec::with_capacity(default_chunk_points_len),
                         );
-                        if tx.send(to_send).is_err() {
-                            break;
+                        if tx.send(Ok(to_send)).is_err() {
+                            return Ok(());
                         }
                     }
                 }
                 if !buffer.is_empty() {
                     // Transform remaining points
-                    transformer
-                        .transform_points_in_place(&mut buffer)
-                        .expect("Failed to transform points");
-                    let _ = tx.send(buffer);
+                    transformer.transform_points_in_place(&mut buffer)?;
+                    let _ = tx.send(Ok(buffer));
                 }
+                Ok(())
             });
             handles.push(handle);
         }
@@ -1033,6 +1061,7 @@ fn external_sort_workflow(
         drop(tx);
 
         for (current_run_index, chunk) in rx.into_iter().enumerate() {
+            let chunk = chunk?;
             let mut shard_points = HashMap::<(u8, u32, u32), Vec<(SortKey, CompactPoint)>>::new();
 
             for p in chunk {
@@ -1060,7 +1089,9 @@ fn external_sort_workflow(
         }
 
         for handle in handles {
-            handle.join().expect("Reading thread panicked");
+            handle
+                .join()
+                .map_err(|_| std::io::Error::other("Point reader thread panicked"))??;
         }
 
         log::info!(
@@ -1200,11 +1231,7 @@ fn external_sort_workflow(
         let root_tileset_path = output_path.join("tileset.json");
         log::info!("write tileset.json: {:?}", root_tileset_path);
         fs::create_dir_all(root_tileset_path.parent().unwrap()).unwrap();
-        fs::write(
-            root_tileset_path,
-            serde_json::to_string_pretty(&tileset).unwrap(),
-        )
-        .unwrap();
+        fs::write(root_tileset_path, serialize_tileset_with_z_up(tileset)?).unwrap();
     }
     Ok(())
 }
@@ -1245,7 +1272,7 @@ fn convert_with_pool(args: ConvertOptions, thread_count: usize) -> std::io::Resu
     log::info!("rayon threads: {}", thread_count);
     log::info!("input files: {:?}", args.input);
     log::info!("output folder: {}", args.output);
-    log::info!("input EPSG: {}", args.input_epsg);
+    log::info!("input reference: {:?}", args.input_reference);
     log::info!("output EPSG: {}", args.output_epsg);
     log::info!("min zoom: {}", args.min);
     log::info!("max zoom: {}", args.max);
@@ -1291,7 +1318,10 @@ fn convert_with_pool(args: ConvertOptions, thread_count: usize) -> std::io::Resu
         format_size(max_memory_bytes)
     );
 
-    if should_use_in_memory(processing_size, max_memory_bytes) {
+    if matches!(args.input_reference, InputReference::CartesianMeters) {
+        log::info!("Using Cartesian meters workflow");
+        cartesian::convert(input_files, extension, &args, &output_path)?;
+    } else if should_use_in_memory(processing_size, max_memory_bytes) {
         log::info!("Using in-memory workflow");
         in_memory_workflow(input_files, &args, &output_path)?;
     } else {
