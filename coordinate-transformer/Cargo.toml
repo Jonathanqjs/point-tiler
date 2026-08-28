@@ -6,7 +6,7 @@ edition.workspace = true
 
 [dependencies]
 pcd-core = { path = "../pcd-core" }
-proj-sys = "0.27.0"
+proj-sys = { version = "0.27.0", features = ["bundled_proj"] }
 libsqlite3-sys = { version = "0.35", features = ["bundled"] }
 
 [features]

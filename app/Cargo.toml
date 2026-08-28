@@ -18,7 +18,7 @@ cesiumtiles-gltf = { path = "../cesiumtiles-gltf" }
 cesiumtiles-gltf-json = { path = "../cesiumtiles-gltf/cesiumtiles-gltf-json" }
 pcd-exporter = { path = "../pcd-exporter" }
 pcd-core = { path = "../pcd-core" }
-coordinate-transformer = { path = "../coordinate-transformer" }
+coordinate-transformer = { path = "../coordinate-transformer", features = ["bundled-proj"] }
 cesiumtiles = "0.0.1"
 rayon = "1.11.0"
 clap = { version = "4.5.20", features = ["derive", "string"] }
